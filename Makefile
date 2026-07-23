@@ -1,4 +1,4 @@
-obj-m += virt_msg-drv.o
+obj-m += virt-msg-drv.o
 
 KDIR := /lib/modules/$(shell uname -r)/build
 
