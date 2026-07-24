@@ -1,3 +1,4 @@
+#include <linux/sysfs.h>
 #include <linux/init.h>
 #include <linux/device.h>
 #include <linux/device/class.h>
@@ -7,6 +8,8 @@
 #include <linux/printk.h>
 #include <linux/cdev.h>
 #include <linux/slab.h>
+#include <linux/mutex.h>
+#include <linux/kfifo.h>
 
 /*
  * Defines
@@ -18,7 +21,7 @@
 	pr_err("%s: " fmt "\n", driver_name, ##__VA_ARGS__)
 
 #define VMD_MAX_DEVICES 8
-#define VMD_MSG_BUFF_SIZE 4096
+#define VMD_QUEUE_ECOUNT 4096
 
 /*
  * Function declarations
@@ -35,14 +38,23 @@ static ssize_t virt_msg_write(struct file *, const char __user *, size_t,
 static int virt_msg_create_devices(void);
 static void virt_msg_destroy_devices(int);
 
+ssize_t count_show(struct device *dev, struct device_attribute *attr,
+		   char *buf);
 /*
  * Struct definitons
  */
+
 struct msg_device {
 	struct device *dev;
-	char *buff;
-	size_t count;
+	DECLARE_KFIFO_PTR(queue, char);
+
+	struct mutex mtx;
 };
+
+/* 
+ * Device attributes
+ */
+static DEVICE_ATTR_RO(count);
 
 /*
  * Global variables
@@ -144,7 +156,9 @@ static void __exit virt_msg_drv_exit(void)
 
 static int virt_msg_open(struct inode *inode, struct file *filp)
 {
-	int index = iminor(inode) - MINOR(dev_num);
+	int index;
+
+	index = iminor(inode) - MINOR(dev_num);
 	filp->private_data = (void *)&msg_devices[index];
 
 	VMD_LOG_INFO("device(%d) open", iminor(inode));
@@ -160,38 +174,38 @@ static int virt_msg_release(struct inode *inode, struct file *filp)
 static ssize_t virt_msg_read(struct file *filp, char __user *buf, size_t count,
 			     loff_t *off)
 {
-	struct msg_device *msg_device = (struct msg_device *)filp->private_data;
+	struct msg_device *msg_device;
+	unsigned copied;
+	int ret;
 
-	if (*off >= msg_device->count)
-		return 0;
+	msg_device = (struct msg_device *)filp->private_data;
 
-	if (count > msg_device->count - *off)
-		count = msg_device->count - *off;
+	mutex_lock(&msg_device->mtx);
+	ret = kfifo_to_user(&msg_device->queue, buf, count, &copied);
+	mutex_unlock(&msg_device->mtx);
 
-	if (copy_to_user(buf, msg_device->buff + *off, count))
-		return -EFAULT;
+	if (ret)
+		return ret;
 
-	*off += count;
-	return count;
+	return copied;
 }
 
 static ssize_t virt_msg_write(struct file *filp, const char __user *buf,
 			      size_t count, loff_t *off)
 {
-	struct msg_device *msg_device = (struct msg_device *)filp->private_data;
+	struct msg_device *msg_device;
+	int ret;
+	unsigned copied;
 
-	if (*off >= VMD_MSG_BUFF_SIZE)
-		return 0;
+	msg_device = (struct msg_device *)filp->private_data;
+	mutex_lock(&msg_device->mtx);
+	ret = kfifo_from_user(&msg_device->queue, buf, count, &copied);
+	mutex_unlock(&msg_device->mtx);
 
-	if (count > VMD_MSG_BUFF_SIZE - *off)
-		count = VMD_MSG_BUFF_SIZE - *off;
+	if (ret)
+		return ret;
 
-	if (copy_from_user(msg_device->buff + *off, buf, count))
-		return -EFAULT;
-
-	*off += count;
-	msg_device->count = *off;
-	return count;
+	return copied;
 }
 
 static int virt_msg_create_devices(void)
@@ -200,10 +214,12 @@ static int virt_msg_create_devices(void)
 	int i;
 
 	for (i = 0; i < cdev_count; ++i) {
-		dev_t curr_dev_num = MKDEV(MAJOR(dev_num), MINOR(dev_num) + i);
+		dev_t curr_dev_num;
+		struct device *p;
 
-		struct device *p = device_create(cls, NULL, curr_dev_num, NULL,
-						 "%s_%d", driver_name, i);
+		curr_dev_num = MKDEV(MAJOR(dev_num), MINOR(dev_num) + i);
+		p = device_create(cls, NULL, curr_dev_num, NULL, "%s_%d",
+				  driver_name, i);
 		if (IS_ERR(p)) {
 			VMD_LOG_ERR("failed device_create");
 			ret = PTR_ERR(p);
@@ -211,13 +227,21 @@ static int virt_msg_create_devices(void)
 		}
 		msg_devices[i].dev = p;
 
-		msg_devices[i].count = 0;
-		msg_devices[i].buff = kcalloc(VMD_MSG_BUFF_SIZE,
-					      sizeof(*msg_devices[i].buff),
-					      GFP_KERNEL);
-		if (!msg_devices[i].buff) {
-			VMD_LOG_ERR("failed to allocate buffer for msg queue");
-			ret = -ENOMEM;
+		dev_set_drvdata(p, &msg_devices[i]);
+		ret = device_create_file(p, &dev_attr_count);
+		if (ret) {
+			VMD_LOG_ERR("failed device_create_file");
+			device_destroy(cls, curr_dev_num);
+			goto failed;
+		}
+
+		mutex_init(&msg_devices[i].mtx);
+
+		ret = kfifo_alloc(&msg_devices[i].queue, VMD_QUEUE_ECOUNT,
+				  GFP_KERNEL);
+		if (ret) {
+			VMD_LOG_ERR("failed kfifo_alloc");
+			device_remove_file(p, &dev_attr_count);
 			device_destroy(cls, curr_dev_num);
 			goto failed;
 		}
@@ -234,9 +258,25 @@ static void virt_msg_destroy_devices(int count)
 	for (int i = 0; i < count; ++i) {
 		dev_t curr_dev_num = MKDEV(MAJOR(dev_num), MINOR(dev_num) + i);
 
+		kfifo_free(&msg_devices[i].queue);
+		mutex_destroy(&msg_devices[i].mtx);
+		device_remove_file(msg_devices[i].dev, &dev_attr_count);
 		device_destroy(cls, curr_dev_num);
-		kfree(msg_devices[i].buff);
 	}
+}
+
+ssize_t count_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct msg_device *msg_device;
+	unsigned len;
+
+	msg_device = dev_get_drvdata(dev);
+
+	mutex_lock(&msg_device->mtx);
+	len = kfifo_len(&msg_device->queue);
+	mutex_unlock(&msg_device->mtx);
+
+	return sysfs_emit(buf, "%u\n", len);
 }
 
 module_init(virt_msg_drv_init);
