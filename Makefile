@@ -11,5 +11,5 @@ clean:
 		*.symvers modules.order Module.symvers \
 		*.cmd \
 		.*.o .*.ko .*.mod .*.mod.c .*.mod.o \
-		.*.symvers .*.cmd
+		.*.symvers .*.cmd .swp
 	rm -rf .tmp_versions .cache
