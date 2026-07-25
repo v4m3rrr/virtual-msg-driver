@@ -10,6 +10,7 @@
 #include <linux/slab.h>
 #include <linux/mutex.h>
 #include <linux/kfifo.h>
+#include <linux/wait.h>
 
 /*
  * Defines
@@ -22,6 +23,17 @@
 
 #define VMD_MAX_DEVICES 8
 #define VMD_QUEUE_ECOUNT 4096
+
+/*
+ * Struct definitons
+ */
+struct msg_device {
+	struct device *dev;
+	DECLARE_KFIFO_PTR(queue, char);
+
+	struct mutex mtx;
+	wait_queue_head_t wait_queue;
+};
 
 /*
  * Function declarations
@@ -38,18 +50,10 @@ static ssize_t virt_msg_write(struct file *, const char __user *, size_t,
 static int virt_msg_create_devices(void);
 static void virt_msg_destroy_devices(int);
 
-ssize_t count_show(struct device *dev, struct device_attribute *attr,
-		   char *buf);
-/*
- * Struct definitons
- */
+static ssize_t count_show(struct device *dev, struct device_attribute *attr,
+			  char *buf);
 
-struct msg_device {
-	struct device *dev;
-	DECLARE_KFIFO_PTR(queue, char);
-
-	struct mutex mtx;
-};
+static int msg_device_has_data(struct msg_device *msg_device);
 
 /* 
  * Device attributes
@@ -107,6 +111,14 @@ static int __init virt_msg_drv_init(void)
 		goto err_alloc_reg;
 	}
 
+	cdev_init(&cdev, &fops);
+
+	ret = cdev_add(&cdev, dev_num, cdev_count);
+	if (ret) {
+		VMD_LOG_ERR("failed cdev_add");
+		goto err_cdev_add;
+	}
+
 	cls = class_create(cls_name);
 	if (IS_ERR(cls)) {
 		VMD_LOG_ERR("failed class_create");
@@ -120,22 +132,14 @@ static int __init virt_msg_drv_init(void)
 		goto err_create_devices;
 	}
 
-	cdev_init(&cdev, &fops);
-
-	ret = cdev_add(&cdev, dev_num, cdev_count);
-	if (ret) {
-		VMD_LOG_ERR("failed cdev_add");
-		goto err_cdev_add;
-	}
-
 	VMD_LOG_INFO("init");
 	return 0;
 
-err_cdev_add:
-	virt_msg_destroy_devices(cdev_count);
 err_create_devices:
 	class_destroy(cls);
 err_class_create:
+	cdev_del(&cdev);
+err_cdev_add:
 	unregister_chrdev_region(dev_num, cdev_count);
 err_alloc_reg:
 	kfree(msg_devices);
@@ -146,9 +150,9 @@ err_inv_param:
 
 static void __exit virt_msg_drv_exit(void)
 {
-	cdev_del(&cdev);
 	virt_msg_destroy_devices(cdev_count);
 	class_destroy(cls);
+	cdev_del(&cdev);
 	unregister_chrdev_region(dev_num, cdev_count);
 	kfree(msg_devices);
 	VMD_LOG_INFO("exit");
@@ -177,8 +181,19 @@ static ssize_t virt_msg_read(struct file *filp, char __user *buf, size_t count,
 	struct msg_device *msg_device;
 	unsigned copied;
 	int ret;
+	int is_empty;
 
 	msg_device = (struct msg_device *)filp->private_data;
+
+	is_empty = !msg_device_has_data(msg_device);
+
+	if (is_empty && (filp->f_flags & O_NONBLOCK))
+		return -EAGAIN;
+
+	ret = wait_event_interruptible(msg_device->wait_queue,
+				       msg_device_has_data(msg_device));
+	if (ret)
+		return ret;
 
 	mutex_lock(&msg_device->mtx);
 	ret = kfifo_to_user(&msg_device->queue, buf, count, &copied);
@@ -204,6 +219,9 @@ static ssize_t virt_msg_write(struct file *filp, const char __user *buf,
 
 	if (ret)
 		return ret;
+
+	if (copied > 0)
+		wake_up_interruptible(&msg_device->wait_queue);
 
 	return copied;
 }
@@ -245,6 +263,8 @@ static int virt_msg_create_devices(void)
 			device_destroy(cls, curr_dev_num);
 			goto failed;
 		}
+
+		init_waitqueue_head(&msg_devices[i].wait_queue);
 	}
 
 	return 0;
@@ -265,7 +285,8 @@ static void virt_msg_destroy_devices(int count)
 	}
 }
 
-ssize_t count_show(struct device *dev, struct device_attribute *attr, char *buf)
+static ssize_t count_show(struct device *dev, struct device_attribute *attr,
+			  char *buf)
 {
 	struct msg_device *msg_device;
 	unsigned len;
@@ -277,6 +298,16 @@ ssize_t count_show(struct device *dev, struct device_attribute *attr, char *buf)
 	mutex_unlock(&msg_device->mtx);
 
 	return sysfs_emit(buf, "%u\n", len);
+}
+
+static int msg_device_has_data(struct msg_device *msg_device)
+{
+	int has_data;
+	mutex_lock(&msg_device->mtx);
+	has_data = !kfifo_is_empty(&msg_device->queue);
+	mutex_unlock(&msg_device->mtx);
+
+	return has_data;
 }
 
 module_init(virt_msg_drv_init);
