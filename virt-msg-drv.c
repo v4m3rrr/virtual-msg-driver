@@ -1,3 +1,4 @@
+#include "asm-generic/errno-base.h"
 #include <linux/sysfs.h>
 #include <linux/init.h>
 #include <linux/device.h>
@@ -11,6 +12,8 @@
 #include <linux/mutex.h>
 #include <linux/kfifo.h>
 #include <linux/wait.h>
+
+#include "virt_msg.h"
 
 /*
  * Defines
@@ -55,6 +58,9 @@ static ssize_t count_show(struct device *dev, struct device_attribute *attr,
 
 static int msg_device_has_data(struct msg_device *msg_device);
 
+static long virt_msg_ioctl(struct file *filp, unsigned int cmd,
+			   unsigned long arg);
+
 /* 
  * Device attributes
  */
@@ -80,6 +86,7 @@ static const struct file_operations fops = {
 	.release = virt_msg_release,
 	.read = virt_msg_read,
 	.write = virt_msg_write,
+	.unlocked_ioctl = virt_msg_ioctl,
 };
 
 struct msg_device *msg_devices = { 0 };
@@ -308,6 +315,30 @@ static int msg_device_has_data(struct msg_device *msg_device)
 	mutex_unlock(&msg_device->mtx);
 
 	return has_data;
+}
+
+static long virt_msg_ioctl(struct file *filp, unsigned int cmd,
+			   unsigned long arg)
+{
+	int ret;
+	struct msg_device *msg_device;
+
+	msg_device = (struct msg_device *)filp->private_data;
+
+	switch (cmd) {
+	case VMD_IOCTL_GCOUNT:
+		int len;
+		mutex_lock(&msg_device->mtx);
+		len = kfifo_len(&msg_device->queue);
+		mutex_unlock(&msg_device->mtx);
+
+		ret = put_user(len, (int __user *)arg);
+		break;
+	default:
+		return -ENOTTY;
+	}
+
+	return ret;
 }
 
 module_init(virt_msg_drv_init);
