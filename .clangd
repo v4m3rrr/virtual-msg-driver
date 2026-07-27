@@ -1,0 +1,19 @@
+CompileFlags:
+  Remove: [
+    -mpreferred-stack-boundary*,
+    -mindirect-branch*,
+    -fmin-function-alignment*,
+    -fconserve-stack,
+    -fno-allow-store-data-races,
+    -fzero-init-padding-bits*,
+    -mskip-rax-setup,
+    -mrecord-mcount,
+    -fno-inline-functions-called-once,
+    -fsanitize=bounds-strict,
+    -nostdinc,
+    -fdiagnostics-show-context=2
+  ]
+  Add: [
+    --driver-mode=gcc,
+    -nobuiltininc
+  ]
