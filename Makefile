@@ -1,4 +1,5 @@
-obj-m += virt-msg-drv.o
+obj-m += vmdd.o
+vmdd-y := vmdd_main.o vmdd_fops.o vmdd_device.o vmdd_ioctl.o
 
 KDIR := /lib/modules/$(shell uname -r)/build
 
