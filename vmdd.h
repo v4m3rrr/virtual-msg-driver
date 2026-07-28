@@ -11,7 +11,8 @@ struct msg_device {
 	DECLARE_KFIFO_PTR(queue, char);
 
 	struct mutex mtx;
-	wait_queue_head_t wait_queue;
+	wait_queue_head_t read_queue;
+	wait_queue_head_t write_queue;
 };
 
 extern const char vmdd_module_name[];
@@ -33,6 +34,6 @@ extern struct msg_device *vmdd_msg_devices;
 	pr_err("%s: " fmt "\n", vmdd_module_name, ##__VA_ARGS__)
 
 #define VMDD_MAX_DEVICES 8
-#define VMDD_QUEUE_ECOUNT 4096
+#define VMDD_QUEUE_ECOUNT 32
 
 #endif // VMDD_H

@@ -61,7 +61,8 @@ int vmdd_create_devices(void)
 			goto failed;
 		}
 
-		init_waitqueue_head(&vmdd_msg_devices[i].wait_queue);
+		init_waitqueue_head(&vmdd_msg_devices[i].read_queue);
+		init_waitqueue_head(&vmdd_msg_devices[i].write_queue);
 	}
 
 	return 0;

@@ -8,6 +8,6 @@
 #define VMDD_IOCTL_GCOUNT _IOR(VMDD_IOCTL_MAGIC, 0, int)
 #define VMDD_IOCTL_SDEVICES _IOW(VMDD_IOCTL_MAGIC, 1, int)
 
-extern long vmdd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
+long vmdd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
 
 #endif // VMDD_IOCTL_H
